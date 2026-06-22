@@ -35,8 +35,15 @@ def make_vgg_layers(cfg: list, batch_norm: bool = True) -> nn.Sequential:
     layers: list[nn.Module] = []
     in_channels = 3
 
-    # TODO: implement the loop described above.
-    raise NotImplementedError("Level 1: implement make_vgg_layers")
+    for v in cfg:
+        if v == "M":
+            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+        else:
+            layers.append(nn.Conv2d(in_channels, v, kernel_size=3, padding=1))
+            if batch_norm:
+                layers.append(nn.BatchNorm2d(v))
+            layers.append(nn.ReLU(inplace=True))
+            in_channels = v
 
     return nn.Sequential(*layers)
 
@@ -57,7 +64,12 @@ class VGG16(nn.Module):
         # Here we end at a 4096-dim feature vector and hand it to the
         # multi-task head.
         self.classifier = nn.Sequential(
-            # TODO: fill in
+            nn.Linear(512 * 7 * 7, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=dropout),
         )
 
         self.head = MultiTaskHead(in_features=4096, dropout=dropout)
