@@ -6,6 +6,7 @@ ViT) and compute a separate CAM for each of the three attribute heads.
 from __future__ import annotations
 
 from typing import Callable
+import math
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,25 @@ class GradCAM:
     def _save_gradient(self, module, grad_in, grad_out) -> None:
         self._gradients = grad_out[0].detach()
 
+    @staticmethod
+    def _tokens_to_feature_map(x: torch.Tensor) -> torch.Tensor:
+        """Convert ViT tokens ``(B, N, D)`` to ``(B, D, H, W)``.
+
+        If a CLS token is present, it is removed before reshaping patch
+        tokens into a square grid.
+        """
+        b, n, d = x.shape
+        grid = int(math.sqrt(n))
+        if grid * grid == n:
+            patches = x
+        else:
+            grid = int(math.sqrt(n - 1))
+            if grid * grid != n - 1:
+                raise ValueError(f"Cannot reshape {n} tokens into a square Grad-CAM map.")
+            patches = x[:, 1:, :]
+
+        return patches.transpose(1, 2).reshape(b, d, grid, grid)
+
     def __call__(
         self,
         x: torch.Tensor,
@@ -46,23 +66,21 @@ class GradCAM:
         score = score_fn(out)
         score.backward(retain_graph=True)
 
-        # Activations/Gradients: (B, C, H, W) for CNN, (B, N+1, D) for ViT.
         a = self._activations
         g = self._gradients
+        if a is None or g is None:
+            raise RuntimeError("Grad-CAM hooks did not capture activations/gradients.")
 
-        if a.dim() == 4:
-            # CNN path: global-average-pool gradients over spatial dims.
-            weights = g.mean(dim=(2, 3), keepdim=True)            # (B, C, 1, 1)
-            cam = F.relu((weights * a).sum(dim=1, keepdim=True))  # (B, 1, H, W)
-        else:
-            # ViT path: token sequence (B, N+1, D) — index 0 is CLS token.
-            # Element-wise product summed over embedding dim gives per-token score.
-            cam = F.relu((g * a).sum(dim=-1))  # (B, N+1)
-            cam = cam[:, 1:]                    # drop CLS → (B, N)
-            n = cam.shape[1]
-            h = w = int(n ** 0.5)
-            cam = cam.reshape(cam.shape[0], 1, h, w)  # (B, 1, h_p, w_p)
+        # CNN target layers produce (B, C, H, W). ViT target layers produce
+        # (B, N, D), where N may include a leading CLS token.
+        if a.ndim == 3:
+            a = self._tokens_to_feature_map(a)
+            g = self._tokens_to_feature_map(g)
+        elif a.ndim != 4:
+            raise ValueError(f"Unsupported activation shape for Grad-CAM: {tuple(a.shape)}")
 
+        weights = g.mean(dim=(2, 3), keepdim=True)            # (B, C, 1, 1)
+        cam = F.relu((weights * a).sum(dim=1, keepdim=True))  # (B, 1, H, W)
         cam = F.interpolate(cam, size=x.shape[-2:], mode="bilinear", align_corners=False)
 
         # Per-image normalization to [0, 1].
