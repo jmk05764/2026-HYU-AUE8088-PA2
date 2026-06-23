@@ -46,12 +46,23 @@ class GradCAM:
         score = score_fn(out)
         score.backward(retain_graph=True)
 
-        # Activations: (B, C, H, W). Gradients: (B, C, H, W) for CNN, or
-        # (B, N, D) for ViT — students should pick the right target_layer.
+        # Activations/Gradients: (B, C, H, W) for CNN, (B, N+1, D) for ViT.
         a = self._activations
         g = self._gradients
-        weights = g.mean(dim=(2, 3), keepdim=True)            # (B, C, 1, 1)
-        cam = F.relu((weights * a).sum(dim=1, keepdim=True))  # (B, 1, H, W)
+
+        if a.dim() == 4:
+            # CNN path: global-average-pool gradients over spatial dims.
+            weights = g.mean(dim=(2, 3), keepdim=True)            # (B, C, 1, 1)
+            cam = F.relu((weights * a).sum(dim=1, keepdim=True))  # (B, 1, H, W)
+        else:
+            # ViT path: token sequence (B, N+1, D) — index 0 is CLS token.
+            # Element-wise product summed over embedding dim gives per-token score.
+            cam = F.relu((g * a).sum(dim=-1))  # (B, N+1)
+            cam = cam[:, 1:]                    # drop CLS → (B, N)
+            n = cam.shape[1]
+            h = w = int(n ** 0.5)
+            cam = cam.reshape(cam.shape[0], 1, h, w)  # (B, 1, h_p, w_p)
+
         cam = F.interpolate(cam, size=x.shape[-2:], mode="bilinear", align_corners=False)
 
         # Per-image normalization to [0, 1].
